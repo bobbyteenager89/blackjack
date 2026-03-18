@@ -6,12 +6,12 @@ import { Badge } from "@/components/ui/badge";
 import {
   type Puzzle,
   getShuffledPuzzles,
-  ACTION_LABELS,
   ACTION_COLORS,
   type Action,
 } from "@/lib/strategy";
 import { type RuleSet } from "@/lib/rules";
 import type { Card, Suit } from "@/lib/blackjack";
+import { isPair } from "@/lib/blackjack";
 
 function makeFakeCard(rank: string): Card {
   const suits: Suit[] = ["spades", "hearts", "diamonds", "clubs"];
@@ -21,13 +21,51 @@ function makeFakeCard(rank: string): Card {
   };
 }
 
-const ANSWER_OPTIONS: { action: Action; label: string }[] = [
-  { action: "H", label: "Hit" },
-  { action: "S", label: "Stand" },
-  { action: "D", label: "Double" },
-  { action: "SP", label: "Split" },
-  { action: "Rh", label: "Surrender" },
-];
+// Simple display label — no compound actions
+function simpleLabel(action: Action, surrenderAllowed: boolean): string {
+  switch (action) {
+    case "H": return "Hit";
+    case "S": return "Stand";
+    case "D": return "Double";
+    case "Ds": return surrenderAllowed ? "Double" : "Double (stand if can't)";
+    case "SP": return "Split";
+    case "Rh": return "Surrender";
+    case "Rs": return "Surrender";
+    case "Rp": return "Surrender";
+    default: return action;
+  }
+}
+
+// What the player should actually do given the rules
+function effectiveAction(action: Action, surrenderAllowed: boolean): string {
+  if (action === "Rp") return surrenderAllowed ? "Surrender" : "Split";
+  if (action === "Rh") return surrenderAllowed ? "Surrender" : "Hit";
+  if (action === "Rs") return surrenderAllowed ? "Surrender" : "Stand";
+  if (action === "Ds") return "Double";
+  if (action === "D") return "Double";
+  if (action === "SP") return "Split";
+  if (action === "S") return "Stand";
+  if (action === "H") return "Hit";
+  return action;
+}
+
+// Map button label to normalized key for matching
+function buttonToKey(label: string): string {
+  const map: Record<string, string> = {
+    Hit: "H",
+    Stand: "S",
+    Double: "D",
+    Split: "SP",
+    Surrender: "R",
+  };
+  return map[label] || label;
+}
+
+// Normalize correct action to what button key it maps to
+function correctButtonKey(action: Action, surrenderAllowed: boolean): string {
+  const eff = effectiveAction(action, surrenderAllowed);
+  return buttonToKey(eff);
+}
 
 function difficultyColor(d: Puzzle["difficulty"]) {
   switch (d) {
@@ -43,13 +81,15 @@ function difficultyColor(d: Puzzle["difficulty"]) {
 export function PuzzleMode({ rules }: { rules: RuleSet }) {
   const [puzzles] = useState<Puzzle[]>(() => {
     let p = getShuffledPuzzles();
+    // Filter out surrender puzzles if surrender not allowed AND the fallback
+    // would be a trivial play (like just hitting)
     if (!rules.surrenderAllowed) {
-      p = p.filter((pz) => !["Rh", "Rs", "Rp"].includes(pz.correctAction));
+      p = p.filter((pz) => !["Rh", "Rs"].includes(pz.correctAction));
     }
     return p;
   });
   const [currentIndex, setCurrentIndex] = useState(0);
-  const [selectedAction, setSelectedAction] = useState<Action | null>(null);
+  const [selectedButton, setSelectedButton] = useState<string | null>(null);
   const [stats, setStats] = useState({ correct: 0, total: 0 });
   const [streak, setStreak] = useState(0);
   const [bestStreak, setBestStreak] = useState(0);
@@ -67,14 +107,25 @@ export function PuzzleMode({ rules }: { rules: RuleSet }) {
     [currentIndex]
   );
 
-  const isCorrect = selectedAction !== null && normalizeAction(selectedAction) === normalizeAction(puzzle.correctAction);
-  const isWrong = selectedAction !== null && !isCorrect;
+  // Determine which buttons to show based on the hand
+  const handIsPair = isPair(playerCards);
+  const buttons = useMemo(() => {
+    const opts = ["Hit", "Stand", "Double"];
+    if (handIsPair) opts.push("Split");
+    if (rules.surrenderAllowed) opts.push("Surrender");
+    return opts;
+  }, [handIsPair, rules.surrenderAllowed]);
+
+  const correctKey = correctButtonKey(puzzle.correctAction, rules.surrenderAllowed);
+  const correctLabel = effectiveAction(puzzle.correctAction, rules.surrenderAllowed);
+  const isCorrect = selectedButton !== null && buttonToKey(selectedButton) === correctKey;
+  const isWrong = selectedButton !== null && !isCorrect;
 
   const handleAnswer = useCallback(
-    (action: Action) => {
-      if (selectedAction !== null) return;
-      setSelectedAction(action);
-      const correct = normalizeAction(action) === normalizeAction(puzzle.correctAction);
+    (label: string) => {
+      if (selectedButton !== null) return;
+      setSelectedButton(label);
+      const correct = buttonToKey(label) === correctKey;
       setStats((s) => ({
         correct: s.correct + (correct ? 1 : 0),
         total: s.total + 1,
@@ -87,15 +138,18 @@ export function PuzzleMode({ rules }: { rules: RuleSet }) {
         setStreak(0);
       }
     },
-    [selectedAction, puzzle, streak, bestStreak]
+    [selectedButton, correctKey, streak, bestStreak]
   );
 
   const nextPuzzle = useCallback(() => {
-    setSelectedAction(null);
+    setSelectedButton(null);
     setCurrentIndex((i) => i + 1);
   }, []);
 
   const pct = stats.total > 0 ? Math.round((stats.correct / stats.total) * 100) : 0;
+
+  // Color for the correct answer badge in explanation
+  const correctActionColor = ACTION_COLORS[puzzle.correctAction] || "bg-zinc-600 text-white";
 
   return (
     <div className="space-y-6">
@@ -154,19 +208,18 @@ export function PuzzleMode({ rules }: { rules: RuleSet }) {
         <div className="space-y-3">
           <p className="text-sm font-medium text-zinc-300">What&apos;s the correct play?</p>
           <div className="flex flex-wrap gap-2">
-            {ANSWER_OPTIONS.map(({ action, label }) => {
-              const isThis = selectedAction === action;
-              const isCorrectAnswer =
-                selectedAction !== null &&
-                normalizeAction(action) === normalizeAction(puzzle.correctAction);
+            {buttons.map((label) => {
+              const isThis = selectedButton === label;
+              const isCorrectBtn =
+                selectedButton !== null && buttonToKey(label) === correctKey;
 
               let btnClass =
                 "px-4 py-2 rounded-lg text-sm font-medium transition-all ";
 
-              if (selectedAction === null) {
+              if (selectedButton === null) {
                 btnClass +=
                   "bg-zinc-800 text-zinc-300 hover:bg-zinc-700 hover:text-white cursor-pointer";
-              } else if (isCorrectAnswer) {
+              } else if (isCorrectBtn) {
                 btnClass += "bg-green-600 text-white ring-2 ring-green-400";
               } else if (isThis && isWrong) {
                 btnClass += "bg-red-600 text-white ring-2 ring-red-400";
@@ -176,9 +229,9 @@ export function PuzzleMode({ rules }: { rules: RuleSet }) {
 
               return (
                 <button
-                  key={action}
-                  onClick={() => handleAnswer(action)}
-                  disabled={selectedAction !== null}
+                  key={label}
+                  onClick={() => handleAnswer(label)}
+                  disabled={selectedButton !== null}
                   className={btnClass}
                 >
                   {label}
@@ -189,7 +242,7 @@ export function PuzzleMode({ rules }: { rules: RuleSet }) {
         </div>
 
         {/* Explanation */}
-        {selectedAction !== null && (
+        {selectedButton !== null && (
           <div
             className={`p-4 rounded-lg border ${
               isCorrect
@@ -202,11 +255,9 @@ export function PuzzleMode({ rules }: { rules: RuleSet }) {
               <span className="text-zinc-400">
                 The right play is{" "}
                 <span
-                  className={`inline-block px-1.5 py-0.5 rounded text-xs font-mono font-bold ${
-                    ACTION_COLORS[puzzle.correctAction]
-                  }`}
+                  className={`inline-block px-1.5 py-0.5 rounded text-xs font-mono font-bold ${correctActionColor}`}
                 >
-                  {ACTION_LABELS[puzzle.correctAction]}
+                  {correctLabel}
                 </span>
               </span>
             </p>
@@ -214,22 +265,15 @@ export function PuzzleMode({ rules }: { rules: RuleSet }) {
           </div>
         )}
 
-        {selectedAction !== null && (
+        {selectedButton !== null && (
           <button
             onClick={nextPuzzle}
             className="w-full py-2.5 rounded-lg bg-zinc-700 hover:bg-zinc-600 text-sm font-medium transition-colors"
           >
-            Next Puzzle &rarr;
+            Next Puzzle {"\u2192"}
           </button>
         )}
       </div>
     </div>
   );
-}
-
-// Normalize actions for comparison (surrender variants map to surrender)
-function normalizeAction(action: Action): string {
-  if (action === "Rh" || action === "Rs" || action === "Rp") return "R";
-  if (action === "Ds") return "D";
-  return action;
 }
