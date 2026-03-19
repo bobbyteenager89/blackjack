@@ -1,17 +1,22 @@
 "use client";
 
-import { useState, useCallback, useMemo } from "react";
+import { useState, useCallback, useMemo, useEffect } from "react";
 import { CardDisplay } from "./card-display";
 import { Badge } from "@/components/ui/badge";
-import {
-  type Puzzle,
-  getShuffledPuzzles,
-  ACTION_COLORS,
-  type Action,
-} from "@/lib/strategy";
+import { ACTION_COLORS, type Action } from "@/lib/strategy";
 import { type RuleSet } from "@/lib/rules";
 import type { Card, Suit } from "@/lib/blackjack";
-import { isPair } from "@/lib/blackjack";
+import {
+  type LearningState,
+  type ScenarioRecord,
+  loadLearningState,
+  pickNextScenario,
+  recordAttempt,
+  getMasteryLevel,
+  getMasteryStats,
+  MASTERY_COLORS,
+  MASTERY_LABELS,
+} from "@/lib/learning";
 
 function makeFakeCard(rank: string): Card {
   const suits: Suit[] = ["spades", "hearts", "diamonds", "clubs"];
@@ -21,22 +26,36 @@ function makeFakeCard(rank: string): Card {
   };
 }
 
-// Simple display label — no compound actions
-function simpleLabel(action: Action, surrenderAllowed: boolean): string {
-  switch (action) {
-    case "H": return "Hit";
-    case "S": return "Stand";
-    case "D": return "Double";
-    case "Ds": return surrenderAllowed ? "Double" : "Double (stand if can't)";
-    case "SP": return "Split";
-    case "Rh": return "Surrender";
-    case "Rs": return "Surrender";
-    case "Rp": return "Surrender";
-    default: return action;
+// Build player cards from scenario
+function scenarioToCards(scenario: ScenarioRecord): [Card, Card] {
+  if (scenario.category === "pair") {
+    const rank = scenario.playerLabel.split(",")[0];
+    return [makeFakeCard(rank), makeFakeCard(rank)];
   }
+  if (scenario.category === "soft") {
+    const otherRank = scenario.playerLabel.split(",")[1];
+    return [makeFakeCard("A"), makeFakeCard(otherRank)];
+  }
+  // Hard total — pick two cards that sum to it
+  const total = parseInt(scenario.playerLabel);
+  // Use common splits avoiding aces (which would make it soft)
+  const splits: Record<number, [string, string]> = {
+    8: ["3", "5"],
+    9: ["4", "5"],
+    10: ["4", "6"],
+    11: ["5", "6"],
+    12: ["10", "2"],
+    13: ["10", "3"],
+    14: ["10", "4"],
+    15: ["10", "5"],
+    16: ["10", "6"],
+    17: ["10", "7"],
+  };
+  const [a, b] = splits[total] || ["10", String(total - 10)];
+  return [makeFakeCard(a), makeFakeCard(b)];
 }
 
-// What the player should actually do given the rules
+// Map action to simple label
 function effectiveAction(action: Action, surrenderAllowed: boolean): string {
   if (action === "Rp") return surrenderAllowed ? "Surrender" : "Split";
   if (action === "Rh") return surrenderAllowed ? "Surrender" : "Hit";
@@ -49,132 +68,184 @@ function effectiveAction(action: Action, surrenderAllowed: boolean): string {
   return action;
 }
 
-// Map button label to normalized key for matching
 function buttonToKey(label: string): string {
   const map: Record<string, string> = {
-    Hit: "H",
-    Stand: "S",
-    Double: "D",
-    Split: "SP",
-    Surrender: "R",
+    Hit: "H", Stand: "S", Double: "D", Split: "SP", Surrender: "R",
   };
   return map[label] || label;
 }
 
-// Normalize correct action to what button key it maps to
 function correctButtonKey(action: Action, surrenderAllowed: boolean): string {
-  const eff = effectiveAction(action, surrenderAllowed);
-  return buttonToKey(eff);
+  return buttonToKey(effectiveAction(action, surrenderAllowed));
 }
 
-function difficultyColor(d: Puzzle["difficulty"]) {
-  switch (d) {
-    case "brutal":
-      return "bg-red-500/20 text-red-400 border-red-500/30";
-    case "hard":
-      return "bg-orange-500/20 text-orange-400 border-orange-500/30";
-    case "tricky":
-      return "bg-yellow-500/20 text-yellow-400 border-yellow-500/30";
-  }
+function masteryBadge(level: ReturnType<typeof getMasteryLevel>) {
+  return (
+    <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${MASTERY_COLORS[level]}`}>
+      {MASTERY_LABELS[level]}
+    </span>
+  );
 }
 
 export function PuzzleMode({ rules }: { rules: RuleSet }) {
-  const [puzzles] = useState<Puzzle[]>(() => {
-    let p = getShuffledPuzzles();
-    // Filter out surrender puzzles if surrender not allowed AND the fallback
-    // would be a trivial play (like just hitting)
-    if (!rules.surrenderAllowed) {
-      p = p.filter((pz) => !["Rh", "Rs"].includes(pz.correctAction));
-    }
-    return p;
-  });
-  const [currentIndex, setCurrentIndex] = useState(0);
+  const [learningState, setLearningState] = useState<LearningState | null>(null);
+  const [currentScenario, setCurrentScenario] = useState<ScenarioRecord | null>(null);
   const [selectedButton, setSelectedButton] = useState<string | null>(null);
-  const [stats, setStats] = useState({ correct: 0, total: 0 });
-  const [streak, setStreak] = useState(0);
-  const [bestStreak, setBestStreak] = useState(0);
+  const [showRetry, setShowRetry] = useState(false);
 
-  const puzzle = puzzles[currentIndex % puzzles.length];
+  // Load from localStorage on mount
+  useEffect(() => {
+    const state = loadLearningState();
+    setLearningState(state);
+    setCurrentScenario(pickNextScenario(state));
+  }, []);
+
+  const scenario = currentScenario;
 
   const playerCards = useMemo(
-    () => [makeFakeCard(puzzle.playerCards[0]), makeFakeCard(puzzle.playerCards[1])],
+    () => (scenario ? scenarioToCards(scenario) : null),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [currentIndex]
-  );
-  const dealerCard = useMemo(
-    () => makeFakeCard(puzzle.dealerUpcard),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [currentIndex]
+    [scenario?.id]
   );
 
-  // Determine which buttons to show based on the hand
-  const handIsPair = isPair(playerCards);
+  const dealerCard = useMemo(
+    () => (scenario ? makeFakeCard(scenario.dealerUpcard) : null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [scenario?.id]
+  );
+
+  // Determine buttons based on scenario
   const buttons = useMemo(() => {
+    if (!scenario) return [];
     const opts = ["Hit", "Stand", "Double"];
-    if (handIsPair) opts.push("Split");
+    if (scenario.category === "pair") opts.push("Split");
     if (rules.surrenderAllowed) opts.push("Surrender");
     return opts;
-  }, [handIsPair, rules.surrenderAllowed]);
+  }, [scenario, rules.surrenderAllowed]);
 
-  const correctKey = correctButtonKey(puzzle.correctAction, rules.surrenderAllowed);
-  const correctLabel = effectiveAction(puzzle.correctAction, rules.surrenderAllowed);
+  const correctKey = scenario ? correctButtonKey(scenario.correctAction, rules.surrenderAllowed) : "";
+  const correctLabel = scenario ? effectiveAction(scenario.correctAction, rules.surrenderAllowed) : "";
   const isCorrect = selectedButton !== null && buttonToKey(selectedButton) === correctKey;
   const isWrong = selectedButton !== null && !isCorrect;
 
   const handleAnswer = useCallback(
     (label: string) => {
-      if (selectedButton !== null) return;
+      if (selectedButton !== null || !learningState || !scenario) return;
       setSelectedButton(label);
       const correct = buttonToKey(label) === correctKey;
-      setStats((s) => ({
-        correct: s.correct + (correct ? 1 : 0),
-        total: s.total + 1,
-      }));
-      if (correct) {
-        const newStreak = streak + 1;
-        setStreak(newStreak);
-        if (newStreak > bestStreak) setBestStreak(newStreak);
-      } else {
-        setStreak(0);
+
+      const newState = recordAttempt(learningState, scenario.id, correct);
+      setLearningState(newState);
+
+      // If wrong, we'll offer a retry of the same scenario
+      if (!correct) {
+        setShowRetry(true);
       }
     },
-    [selectedButton, correctKey, streak, bestStreak]
+    [selectedButton, learningState, scenario, correctKey]
   );
 
-  const nextPuzzle = useCallback(() => {
+  const nextScenario = useCallback(() => {
+    if (!learningState) return;
     setSelectedButton(null);
-    setCurrentIndex((i) => i + 1);
-  }, []);
+    setShowRetry(false);
+    setCurrentScenario(pickNextScenario(learningState));
+  }, [learningState]);
 
-  const pct = stats.total > 0 ? Math.round((stats.correct / stats.total) * 100) : 0;
+  const retryScenario = useCallback(() => {
+    // Same scenario, new card visuals
+    setSelectedButton(null);
+    setShowRetry(false);
+    if (scenario) {
+      // Force re-render by creating a shallow copy with updated id suffix
+      setCurrentScenario({ ...scenario });
+    }
+  }, [scenario]);
 
-  // Color for the correct answer badge in explanation
-  const correctActionColor = ACTION_COLORS[puzzle.correctAction] || "bg-zinc-600 text-white";
+  if (!learningState || !scenario || !playerCards || !dealerCard) {
+    return <div className="text-zinc-500 text-sm">Loading...</div>;
+  }
+
+  const stats = getMasteryStats(learningState);
+  const session = learningState.sessionStats;
+  const pct = session.total > 0 ? Math.round((session.correct / session.total) * 100) : 0;
+  const mastery = getMasteryLevel(
+    learningState.scenarios[scenario.id] || scenario
+  );
+  const scenarioRecord = learningState.scenarios[scenario.id] || scenario;
+  const scenarioAccuracy = scenarioRecord.totalAttempts > 0
+    ? Math.round((scenarioRecord.correctAttempts / scenarioRecord.totalAttempts) * 100)
+    : null;
+
+  const correctActionColor = ACTION_COLORS[scenario.correctAction] || "bg-zinc-600 text-white";
 
   return (
     <div className="space-y-6">
-      {/* Stats bar */}
+      {/* Progress bar */}
+      <div className="space-y-2">
+        <div className="flex items-center justify-between text-xs text-zinc-500">
+          <span>
+            Mastered {stats.mastered} of {stats.total} scenarios
+          </span>
+          <span>{Math.round((stats.mastered / stats.total) * 100)}%</span>
+        </div>
+        <div className="h-2 bg-zinc-800 rounded-full overflow-hidden flex">
+          <div
+            className="bg-green-600 transition-all duration-500"
+            style={{ width: `${(stats.mastered / stats.total) * 100}%` }}
+          />
+          <div
+            className="bg-yellow-600 transition-all duration-500"
+            style={{ width: `${(stats.familiar / stats.total) * 100}%` }}
+          />
+          <div
+            className="bg-red-600 transition-all duration-500"
+            style={{ width: `${(stats.learning / stats.total) * 100}%` }}
+          />
+        </div>
+        <div className="flex gap-4 text-[10px] text-zinc-600">
+          <span className="flex items-center gap-1">
+            <span className="w-2 h-2 rounded-full bg-green-600" /> {stats.mastered} mastered
+          </span>
+          <span className="flex items-center gap-1">
+            <span className="w-2 h-2 rounded-full bg-yellow-600" /> {stats.familiar} familiar
+          </span>
+          <span className="flex items-center gap-1">
+            <span className="w-2 h-2 rounded-full bg-red-600" /> {stats.learning} learning
+          </span>
+          <span className="flex items-center gap-1">
+            <span className="w-2 h-2 rounded-full bg-zinc-700" /> {stats.unseen} unseen
+          </span>
+        </div>
+      </div>
+
+      {/* Session stats */}
       <div className="flex items-center justify-between">
         <div className="flex gap-4 text-sm">
           <span className="text-zinc-500">
-            Score:{" "}
+            Session:{" "}
             <span className="text-zinc-200 font-mono">
-              {stats.correct}/{stats.total}
+              {session.correct}/{session.total}
             </span>{" "}
             <span className="text-zinc-600">({pct}%)</span>
           </span>
           <span className="text-zinc-500">
-            Streak: <span className="text-zinc-200 font-mono">{streak}</span>
+            Streak: <span className="text-zinc-200 font-mono">{session.streak}</span>
           </span>
-          {bestStreak > 0 && (
+          {session.bestStreak > 0 && (
             <span className="text-zinc-500">
-              Best: <span className="text-zinc-200 font-mono">{bestStreak}</span>
+              Best: <span className="text-zinc-200 font-mono">{session.bestStreak}</span>
             </span>
           )}
         </div>
-        <Badge variant="outline" className={difficultyColor(puzzle.difficulty)}>
-          {puzzle.difficulty}
-        </Badge>
+        <div className="flex items-center gap-2">
+          {scenarioAccuracy !== null && (
+            <span className="text-[10px] text-zinc-600 font-mono">
+              {scenarioAccuracy}% on this hand
+            </span>
+          )}
+          {masteryBadge(mastery)}
+        </div>
       </div>
 
       {/* The hand */}
@@ -261,17 +332,33 @@ export function PuzzleMode({ rules }: { rules: RuleSet }) {
                 </span>
               </span>
             </p>
-            <p className="text-sm text-zinc-400 mt-2">{puzzle.explanation}</p>
+            <p className="text-sm text-zinc-400 mt-2">{scenario.explanation}</p>
+            {isWrong && scenarioRecord.totalAttempts > 1 && (
+              <p className="text-xs text-zinc-600 mt-2">
+                You&apos;ve missed this hand {scenarioRecord.totalAttempts - scenarioRecord.correctAttempts} time{scenarioRecord.totalAttempts - scenarioRecord.correctAttempts !== 1 ? "s" : ""}.
+                {" "}It&apos;ll come back more often until you get it consistently.
+              </p>
+            )}
           </div>
         )}
 
         {selectedButton !== null && (
-          <button
-            onClick={nextPuzzle}
-            className="w-full py-2.5 rounded-lg bg-zinc-700 hover:bg-zinc-600 text-sm font-medium transition-colors"
-          >
-            Next Puzzle {"\u2192"}
-          </button>
+          <div className="flex gap-2">
+            {showRetry && (
+              <button
+                onClick={retryScenario}
+                className="flex-1 py-2.5 rounded-lg bg-red-900/30 hover:bg-red-900/50 border border-red-800/30 text-sm font-medium transition-colors text-red-300"
+              >
+                Try Again
+              </button>
+            )}
+            <button
+              onClick={nextScenario}
+              className="flex-1 py-2.5 rounded-lg bg-zinc-700 hover:bg-zinc-600 text-sm font-medium transition-colors"
+            >
+              Next {"\u2192"}
+            </button>
+          </div>
         )}
       </div>
     </div>

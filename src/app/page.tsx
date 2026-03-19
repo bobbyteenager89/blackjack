@@ -6,6 +6,7 @@ import { StrategyChart } from "@/components/strategy-chart";
 import { PuzzleMode } from "@/components/puzzle-mode";
 import { BlackjackGame } from "@/components/game";
 import { Settings } from "@/components/settings";
+import { Progress } from "@/components/progress";
 import { type RuleSet, DEFAULT_RULES } from "@/lib/rules";
 
 export default function Home() {
@@ -23,16 +24,21 @@ export default function Home() {
         </p>
       </header>
 
-      <Tabs defaultValue="puzzles" className="space-y-6">
+      <Tabs defaultValue="train" className="space-y-6">
         <TabsList className="bg-zinc-900 border border-zinc-800">
-          <TabsTrigger value="puzzles">Puzzles</TabsTrigger>
+          <TabsTrigger value="train">Train</TabsTrigger>
+          <TabsTrigger value="progress">Progress</TabsTrigger>
           <TabsTrigger value="play">Play</TabsTrigger>
           <TabsTrigger value="chart">Chart</TabsTrigger>
           <TabsTrigger value="settings">Rules</TabsTrigger>
         </TabsList>
 
-        <TabsContent value="puzzles">
+        <TabsContent value="train">
           <PuzzleMode rules={rules} />
+        </TabsContent>
+
+        <TabsContent value="progress">
+          <Progress />
         </TabsContent>
 
         <TabsContent value="play">
