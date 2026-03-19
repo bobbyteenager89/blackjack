@@ -6,6 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { ACTION_COLORS, type Action } from "@/lib/strategy";
 import { type RuleSet } from "@/lib/rules";
 import type { Card, Suit } from "@/lib/blackjack";
+import { isPair, handValue } from "@/lib/blackjack";
 import {
   type LearningState,
   type ScenarioRecord,
@@ -55,6 +56,19 @@ function scenarioToCards(scenario: ScenarioRecord): [Card, Card] {
   return [makeFakeCard(a), makeFakeCard(b)];
 }
 
+// Compute hand total label: "Pair of 8s", "Soft 18", "Hard 16"
+function handTotalLabel(cards: [Card, Card]): string {
+  if (isPair(cards)) {
+    const rank = cards[0].rank;
+    const label = rank === "A" ? "Ace" : rank;
+    const plural = rank === "A" ? "Aces" : `${label}s`;
+    return `Pair of ${plural}`;
+  }
+  const hv = handValue(cards);
+  if (hv.soft) return `Soft ${hv.total}`;
+  return `Hard ${hv.total}`;
+}
+
 // Map action to simple label
 function effectiveAction(action: Action, surrenderAllowed: boolean): string {
   if (action === "Rp") return surrenderAllowed ? "Surrender" : "Split";
@@ -86,6 +100,15 @@ function masteryBadge(level: ReturnType<typeof getMasteryLevel>) {
     </span>
   );
 }
+
+// Keyboard shortcut hints per button label
+const BUTTON_SHORTCUTS: Record<string, string> = {
+  Hit: "H",
+  Stand: "S",
+  Double: "D",
+  Split: "P",
+  Surrender: "R",
+};
 
 export function PuzzleMode({ rules }: { rules: RuleSet }) {
   const [learningState, setLearningState] = useState<LearningState | null>(null);
@@ -162,6 +185,45 @@ export function PuzzleMode({ rules }: { rules: RuleSet }) {
     }
   }, [scenario]);
 
+  // Keyboard shortcuts
+  useEffect(() => {
+    const handleKey = (e: KeyboardEvent) => {
+      // Ignore if typing in an input
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+
+      const key = e.key.toUpperCase();
+
+      if (selectedButton === null) {
+        // Action shortcuts
+        const labelMap: Record<string, string> = {
+          H: "Hit",
+          S: "Stand",
+          D: "Double",
+          P: "Split",
+          R: "Surrender",
+        };
+        const label = labelMap[key];
+        if (label && buttons.includes(label)) {
+          e.preventDefault();
+          handleAnswer(label);
+        }
+      } else {
+        // Next / retry shortcuts
+        if (key === "ENTER" || e.key === " ") {
+          e.preventDefault();
+          if (showRetry && isWrong) {
+            retryScenario();
+          } else {
+            nextScenario();
+          }
+        }
+      }
+    };
+
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, [selectedButton, buttons, handleAnswer, showRetry, isWrong, retryScenario, nextScenario]);
+
   if (!learningState || !scenario || !playerCards || !dealerCard) {
     return <div className="text-zinc-500 text-sm">Loading...</div>;
   }
@@ -178,6 +240,7 @@ export function PuzzleMode({ rules }: { rules: RuleSet }) {
     : null;
 
   const correctActionColor = ACTION_COLORS[scenario.correctAction] || "bg-zinc-600 text-white";
+  const handLabel = handTotalLabel(playerCards);
 
   return (
     <div className="space-y-6">
@@ -250,7 +313,7 @@ export function PuzzleMode({ rules }: { rules: RuleSet }) {
 
       {/* The hand */}
       <div className="bg-zinc-900/50 border border-zinc-800 rounded-xl p-6 space-y-6">
-        <div className="grid grid-cols-2 gap-8">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-8">
           {/* Dealer */}
           <div className="space-y-2">
             <p className="text-xs uppercase tracking-wider text-zinc-500 font-medium">
@@ -264,9 +327,15 @@ export function PuzzleMode({ rules }: { rules: RuleSet }) {
 
           {/* Player */}
           <div className="space-y-2">
-            <p className="text-xs uppercase tracking-wider text-zinc-500 font-medium">
-              Your hand
-            </p>
+            {/* Hand total label */}
+            <div className="flex items-center gap-2">
+              <p className="text-xs uppercase tracking-wider text-zinc-500 font-medium">
+                Your hand
+              </p>
+              <span className="text-xs font-mono font-bold text-zinc-300 bg-zinc-800 px-2 py-0.5 rounded">
+                {handLabel}
+              </span>
+            </div>
             <div className="flex gap-2">
               {playerCards.map((card, i) => (
                 <CardDisplay key={i} card={card} size="lg" />
@@ -285,7 +354,7 @@ export function PuzzleMode({ rules }: { rules: RuleSet }) {
                 selectedButton !== null && buttonToKey(label) === correctKey;
 
               let btnClass =
-                "px-4 py-2 rounded-lg text-sm font-medium transition-all ";
+                "px-4 py-2 rounded-lg text-sm font-medium transition-all whitespace-nowrap ";
 
               if (selectedButton === null) {
                 btnClass +=
@@ -306,10 +375,26 @@ export function PuzzleMode({ rules }: { rules: RuleSet }) {
                   className={btnClass}
                 >
                   {label}
+                  {selectedButton === null && BUTTON_SHORTCUTS[label] && (
+                    <span className="ml-1.5 text-[10px] text-zinc-500 font-mono">
+                      [{BUTTON_SHORTCUTS[label]}]
+                    </span>
+                  )}
                 </button>
               );
             })}
           </div>
+          {/* Keyboard hint */}
+          {selectedButton === null && (
+            <p className="text-[10px] text-zinc-600">
+              Keyboard: H=Hit, S=Stand, D=Double{buttons.includes("Split") ? ", P=Split" : ""}{buttons.includes("Surrender") ? ", R=Surrender" : ""}
+            </p>
+          )}
+          {selectedButton !== null && (
+            <p className="text-[10px] text-zinc-600">
+              Press <kbd className="px-1 py-0.5 bg-zinc-800 rounded text-[9px]">Enter</kbd> or <kbd className="px-1 py-0.5 bg-zinc-800 rounded text-[9px]">Space</kbd> for {showRetry && isWrong ? "Try Again" : "Next"}
+            </p>
+          )}
         </div>
 
         {/* Explanation */}
@@ -347,14 +432,14 @@ export function PuzzleMode({ rules }: { rules: RuleSet }) {
             {showRetry && (
               <button
                 onClick={retryScenario}
-                className="flex-1 py-2.5 rounded-lg bg-red-900/30 hover:bg-red-900/50 border border-red-800/30 text-sm font-medium transition-colors text-red-300"
+                className="flex-1 py-2.5 rounded-lg bg-red-900/30 hover:bg-red-900/50 border border-red-800/30 text-sm font-medium transition-colors text-red-300 whitespace-nowrap"
               >
                 Try Again
               </button>
             )}
             <button
               onClick={nextScenario}
-              className="flex-1 py-2.5 rounded-lg bg-zinc-700 hover:bg-zinc-600 text-sm font-medium transition-colors"
+              className="flex-1 py-2.5 rounded-lg bg-zinc-700 hover:bg-zinc-600 text-sm font-medium transition-colors whitespace-nowrap"
             >
               Next {"\u2192"}
             </button>

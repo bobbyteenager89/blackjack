@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { type RuleSet } from "@/lib/rules";
 import { HandDisplay } from "./card-display";
 import {
@@ -10,8 +10,15 @@ import {
   isBusted,
   isBlackjack,
   isPair,
+  cardValue,
 } from "@/lib/blackjack";
 import { getCorrectAction, ACTION_LABELS, ACTION_COLORS } from "@/lib/strategy";
+import {
+  loadLearningState,
+  saveLearningState,
+  recordAttempt,
+  type LearningState,
+} from "@/lib/learning";
 
 type GamePhase = "betting" | "playing" | "dealer" | "result";
 
@@ -57,8 +64,61 @@ function initialState(): GameState {
   };
 }
 
+// Build a scenario ID from the current hand for learning engine
+function buildScenarioId(playerCards: Card[], dealerCards: Card[]): string | null {
+  if (playerCards.length < 2 || dealerCards.length < 2) return null;
+
+  const dealerRank = dealerCards[0].rank;
+  const dealerLabel =
+    ["J", "Q", "K"].includes(dealerRank) ? "10" : dealerRank;
+
+  // Check pairs
+  if (isPair(playerCards)) {
+    const rank = playerCards[0].rank;
+    const pairKey =
+      rank === "A"
+        ? "A,A"
+        : `${cardValue(rank)},${cardValue(rank)}`;
+    return `pair-${pairKey}-vs-${dealerLabel}`;
+  }
+
+  // Check soft
+  const hv = handValue(playerCards);
+  if (hv.soft && playerCards.length === 2) {
+    const nonAce = playerCards.find((c) => c.rank !== "A");
+    if (nonAce) {
+      const val = cardValue(nonAce.rank);
+      return `soft-A,${val}-vs-${dealerLabel}`;
+    }
+  }
+
+  // Hard total
+  const total = Math.min(hv.total, 21);
+  return `hard-${total}-vs-${dealerLabel}`;
+}
+
+// Human-readable hand total label
+function handTotalLabel(cards: Card[]): string {
+  if (cards.length < 2) return "";
+  if (isPair(cards)) {
+    const rank = cards[0].rank;
+    const label = rank === "A" ? "Ace" : String(cardValue(rank));
+    const plural = rank === "A" ? "Aces" : `${label}s`;
+    return `Pair of ${plural}`;
+  }
+  const hv = handValue(cards);
+  if (hv.soft) return `Soft ${hv.total}`;
+  return `Hard ${hv.total}`;
+}
+
 export function BlackjackGame({ rules }: { rules: RuleSet }) {
   const [state, setState] = useState<GameState>(initialState);
+  // We keep learning state in a ref so callbacks always see the latest
+  const learningRef = useRef<LearningState | null>(null);
+
+  useEffect(() => {
+    learningRef.current = loadLearningState();
+  }, []);
 
   const deal = useCallback(() => {
     setState((s) => {
@@ -120,7 +180,7 @@ export function BlackjackGame({ rules }: { rules: RuleSet }) {
         hint: ACTION_LABELS[correct],
       };
     });
-  }, []);
+  }, [rules.surrenderAllowed]);
 
   const playDealer = useCallback((dealerCards: Card[], shoe: Card[]): [Card[], Card[]] => {
     const cards = [...dealerCards];
@@ -182,6 +242,29 @@ export function BlackjackGame({ rules }: { rules: RuleSet }) {
     [playDealer]
   );
 
+  // Record action in learning engine
+  const recordLearningAttempt = useCallback(
+    (playerCards: Card[], dealerCards: Card[], actionTaken: string) => {
+      const scenarioId = buildScenarioId(playerCards, dealerCards);
+      if (!scenarioId || !learningRef.current) return;
+
+      const correct = getCorrectAction(
+        playerCards,
+        dealerCards[0].rank,
+        isPair(playerCards),
+        playerCards.length === 2,
+        rules.surrenderAllowed && playerCards.length === 2
+      );
+      const normalizedCorrect = normalizeForCheck(correct);
+      const normalizedAction = normalizeForCheck(actionTaken);
+      const isCorrect = normalizedAction === normalizedCorrect;
+
+      learningRef.current = recordAttempt(learningRef.current, scenarioId, isCorrect);
+      saveLearningState(learningRef.current);
+    },
+    [rules.surrenderAllowed]
+  );
+
   const checkPlay = useCallback(
     (action: string) => {
       const correct = getCorrectAction(
@@ -200,8 +283,11 @@ export function BlackjackGame({ rules }: { rules: RuleSet }) {
         handsPlayed: s.handsPlayed + 1,
         correctPlays: s.correctPlays + (isCorrect ? 1 : 0),
       }));
+
+      // Feed into learning engine
+      recordLearningAttempt(state.playerCards, state.dealerCards, action);
     },
-    [state.playerCards, state.dealerCards, rules.surrenderAllowed]
+    [state.playerCards, state.dealerCards, rules.surrenderAllowed, recordLearningAttempt]
   );
 
   const hit = useCallback(() => {
@@ -306,12 +392,46 @@ export function BlackjackGame({ rules }: { rules: RuleSet }) {
     setState((s) => ({ ...s, showHint: !s.showHint }));
   }, []);
 
+  // Keyboard shortcuts during play
+  useEffect(() => {
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      if (state.phase !== "playing" && state.phase !== "result" && state.phase !== "betting") return;
+
+      const key = e.key.toUpperCase();
+
+      if (state.phase === "betting" && (key === "ENTER" || e.key === " ")) {
+        e.preventDefault();
+        deal();
+        return;
+      }
+
+      if (state.phase === "result" && (key === "ENTER" || e.key === " " || key === "D")) {
+        e.preventDefault();
+        deal();
+        return;
+      }
+
+      if (state.phase === "playing") {
+        if (key === "H") { e.preventDefault(); hit(); }
+        else if (key === "S") { e.preventDefault(); stand(); }
+        else if (key === "D" && state.playerCards.length === 2) { e.preventDefault(); double(); }
+        else if (key === "R" && rules.surrenderAllowed && state.playerCards.length === 2) { e.preventDefault(); surrender(); }
+      }
+    };
+
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, [state.phase, state.playerCards.length, deal, hit, stand, double, surrender, rules.surrenderAllowed]);
+
   const playerHV = handValue(state.playerCards);
   const dealerHV = handValue(state.dealerCards);
   const accuracy =
     state.handsPlayed > 0
       ? Math.round((state.correctPlays / state.handsPlayed) * 100)
       : 0;
+
+  const playerHandLabel = handTotalLabel(state.playerCards);
 
   return (
     <div className="space-y-6">
@@ -365,80 +485,84 @@ export function BlackjackGame({ rules }: { rules: RuleSet }) {
               onClick={deal}
               className="px-8 py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-lg transition-colors mt-2"
             >
-              Deal
+              Deal <span className="text-emerald-300 text-xs font-normal ml-1">[Enter]</span>
             </button>
           </div>
         ) : (
           <>
-            {/* Dealer hand */}
-            <div className="space-y-2">
-              <div className="flex items-center gap-2">
-                <p className="text-xs uppercase tracking-wider text-zinc-500 font-medium">
-                  Dealer
-                </p>
-                {state.phase === "result" && (
-                  <span className="text-xs font-mono text-zinc-400">
-                    ({dealerHV.total}
-                    {dealerHV.soft ? " soft" : ""})
-                  </span>
-                )}
+            {/* Hands: responsive grid */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+              {/* Dealer hand */}
+              <div className="space-y-2">
+                <div className="flex items-center gap-2">
+                  <p className="text-xs uppercase tracking-wider text-zinc-500 font-medium">
+                    Dealer
+                  </p>
+                  {state.phase === "result" && (
+                    <span className="text-xs font-mono text-zinc-400">
+                      ({dealerHV.total}
+                      {dealerHV.soft ? " soft" : ""})
+                    </span>
+                  )}
+                </div>
+                <HandDisplay
+                  cards={state.dealerCards}
+                  hideSecond={state.phase === "playing"}
+                />
               </div>
-              <HandDisplay
-                cards={state.dealerCards}
-                hideSecond={state.phase === "playing"}
-              />
-            </div>
 
-            {/* Player hand */}
-            <div className="space-y-2">
-              <div className="flex items-center gap-2">
-                <p className="text-xs uppercase tracking-wider text-zinc-500 font-medium">
-                  Your Hand
-                </p>
-                <span className="text-xs font-mono text-zinc-400">
-                  ({playerHV.total}
-                  {playerHV.soft ? " soft" : ""})
-                </span>
+              {/* Player hand */}
+              <div className="space-y-2">
+                <div className="flex items-center gap-2">
+                  <p className="text-xs uppercase tracking-wider text-zinc-500 font-medium">
+                    Your Hand
+                  </p>
+                  {state.playerCards.length >= 2 && (
+                    <span className="text-xs font-mono font-bold text-zinc-300 bg-zinc-800/80 px-2 py-0.5 rounded">
+                      {playerHandLabel}
+                    </span>
+                  )}
+                </div>
+                <HandDisplay cards={state.playerCards} />
               </div>
-              <HandDisplay cards={state.playerCards} />
             </div>
 
             {/* Actions */}
             {state.phase === "playing" && (
-              <div className="flex items-center gap-3 pt-2">
+              <div className="flex items-center gap-2 pt-2 flex-wrap">
                 <button
                   onClick={hit}
-                  className="px-5 py-2 bg-red-600 hover:bg-red-500 text-white font-medium rounded-lg transition-colors"
+                  className="px-5 py-2 bg-red-600 hover:bg-red-500 text-white font-medium rounded-lg transition-colors whitespace-nowrap"
                 >
-                  Hit
+                  Hit <span className="text-red-300 text-xs font-normal">[H]</span>
                 </button>
                 <button
                   onClick={stand}
-                  className="px-5 py-2 bg-green-600 hover:bg-green-500 text-white font-medium rounded-lg transition-colors"
+                  className="px-5 py-2 bg-green-600 hover:bg-green-500 text-white font-medium rounded-lg transition-colors whitespace-nowrap"
                 >
-                  Stand
+                  Stand <span className="text-green-300 text-xs font-normal">[S]</span>
                 </button>
                 {state.playerCards.length === 2 && (
                   <button
                     onClick={double}
-                    className="px-5 py-2 bg-yellow-500 hover:bg-yellow-400 text-black font-medium rounded-lg transition-colors"
+                    className="px-5 py-2 bg-yellow-500 hover:bg-yellow-400 text-black font-medium rounded-lg transition-colors whitespace-nowrap"
                   >
-                    Double
+                    Double <span className="text-yellow-700 text-xs font-normal">[D]</span>
                   </button>
                 )}
                 {rules.surrenderAllowed && state.playerCards.length === 2 && (
                   <button
                     onClick={surrender}
-                    className="px-5 py-2 bg-purple-600 hover:bg-purple-500 text-white font-medium rounded-lg transition-colors"
+                    className="px-5 py-2 bg-purple-600 hover:bg-purple-500 text-white font-medium rounded-lg transition-colors whitespace-nowrap"
                   >
-                    Surrender
+                    Surrender <span className="text-purple-300 text-xs font-normal">[R]</span>
                   </button>
                 )}
 
                 <div className="ml-auto">
                   <button
                     onClick={toggleHint}
-                    className={`px-3 py-1.5 text-xs rounded transition-colors ${
+                    className={`px-3 py-1.5 text-xs rounded transition-colors whitespace-nowrap ${
                       state.showHint
                         ? "bg-zinc-600 text-zinc-200"
                         : "bg-zinc-800 text-zinc-500 hover:text-zinc-300"
@@ -466,9 +590,9 @@ export function BlackjackGame({ rules }: { rules: RuleSet }) {
                 </p>
                 <button
                   onClick={deal}
-                  className="px-6 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-medium rounded-lg transition-colors"
+                  className="px-6 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-medium rounded-lg transition-colors whitespace-nowrap"
                 >
-                  Deal Again
+                  Deal Again <span className="text-emerald-300 text-xs font-normal ml-1">[Enter]</span>
                 </button>
               </div>
             )}

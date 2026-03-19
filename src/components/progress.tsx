@@ -32,7 +32,7 @@ function MasteryCell({
 
   return (
     <td
-      className={`${colors[mastery] || colors.unseen} w-8 h-7 text-center border border-zinc-800/30`}
+      className={`${colors[mastery] || colors.unseen} w-5 h-5 sm:w-8 sm:h-7 text-center border border-zinc-800/30`}
       title={
         attempts > 0
           ? `${Math.round(accuracy * 100)}% (${attempts} attempts)`
@@ -86,7 +86,7 @@ export function Progress() {
       </div>
 
       {/* Summary cards */}
-      <div className="grid grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         {(
           [
             { level: "mastered", color: "text-green-400", bg: "bg-green-900/20 border-green-800/30" },

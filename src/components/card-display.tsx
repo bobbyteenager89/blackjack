@@ -50,7 +50,7 @@ export function CardDisplay({
   const sizeClasses = {
     sm: "w-14 h-20",
     md: "w-[4.5rem] h-[6.5rem]",
-    lg: "w-24 h-36",
+    lg: "w-16 h-24 sm:w-20 sm:h-[7.5rem] md:w-24 md:h-36",
   };
 
   const rankSize = {
